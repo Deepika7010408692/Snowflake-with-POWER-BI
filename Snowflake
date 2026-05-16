@@ -1,0 +1,359 @@
+CREATE DATABASE HOTEL_DB;
+USE DATABASE HOTEL_DB;
+CREATE SCHEMA HOTEL_DB.HOTEL_SCHEMA;
+USE SCHEMA HOTEL_SCHEMA;
+
+DROP TABLE customers;
+
+CREATE TABLE customers (
+    customerId STRING PRIMARY KEY,
+    customerName STRING,
+    email STRING,
+    city STRING,
+    customerType STRING
+);
+
+DROP TABLE hotelS;
+
+CREATE TABLE hotels (
+    hotelId STRING PRIMARY KEY,
+    hotelName STRING,
+    location STRING,
+    starRating INT,
+    status STRING
+);
+
+DROP TABLE rooms;
+CREATE TABLE rooms (
+    roomId STRING PRIMARY KEY,
+    hotelId STRING,
+    roomType STRING,
+    roomPrice STRING,
+    roomStatus STRING
+);
+DROP TABLE bookings;
+CREATE TABLE bookings (
+    bookingId STRING PRIMARY KEY,
+    customerId STRING,
+    roomId STRING,
+    bookingDate STRING,
+    bookingAmount STRING,
+    bookingStatus STRING
+);
+
+DROP TABLE feedback1;
+DROP TABLE feedback2;
+CREATE TABLE feedback2 (
+    feedbackId STRING PRIMARY KEY,
+    bookingId STRING,
+    rating STRING,
+    comments STRING,
+    submittedAt TIMESTAMP
+);
+
+
+
+CREATE OR REPLACE STAGE hotel_stage;
+
+CREATE OR REPLACE FILE FORMAT csv_format
+TYPE = 'CSV'
+SKIP_HEADER = 1;
+
+CREATE OR REPLACE FILE FORMAT json_format
+TYPE = 'JSON';
+
+COPY INTO hotels
+FROM @hotel_stage/hotels.csv
+FILE_FORMAT = (FORMAT_NAME='csv_format');
+
+SELECT * FROM hotels;
+
+COPY INTO customers
+FROM @hotel_stage/customers.csv
+FILE_FORMAT = csv_format;
+
+SELECT * FROM customers;
+
+COPY INTO rooms
+FROM @hotel_stage/rooms.csv
+FILE_FORMAT = (FORMAT_NAME='csv_format');
+
+SELECT * FROM rooms;
+
+COPY INTO bookings
+FROM @hotel_stage/bookings.csv
+FILE_FORMAT = (FORMAT_NAME='csv_format');
+
+SELECT * FROM bookings;
+
+COPY INTO feedback2
+FROM @hotel_stage/feedback2.csv
+FILE_FORMAT = (TYPE='CSV' SKIP_HEADER=1 FIELD_OPTIONALLY_ENCLOSED_BY='"');
+
+SELECT * FROM feedback2;
+
+CREATE OR REPLACE TABLE BOOKING (
+    bookingId INT PRIMARY KEY,
+    customerId INT,
+    roomId INT,
+    bookingDate DATE,
+    bookingAmount NUMBER CHECK (bookingAmount > 0),
+    bookingStatus STRING
+);
+INSERT INTO BOOKING
+VALUES (1,101,201,'2026-05-15',5000,'Confirmed');
+
+INSERT INTO BOOKING
+VALUES (2,101,202,'2026-05-15',500,'Confirmed');
+
+CREATE OR REPLACE TABLE FEEDBACK2 (
+    feedbackId INT PRIMARY KEY,
+    bookingId INT,
+    rating INT CHECK (rating BETWEEN 1 AND 5),
+    comments STRING,
+    submittedAt TIMESTAMP
+);
+
+INSERT INTO FEEDBACK2
+VALUES (1,1,4,'Good service',CURRENT_TIMESTAMP);
+
+INSERT INTO FEEDBACK2
+VALUES (2,1,3,'Bad',CURRENT_TIMESTAMP);
+
+SHOW TABLES;
+
+LIST @hotel_stage;
+
+CREATE OR REPLACE FILE FORMAT csv_format
+TYPE = CSV
+SKIP_HEADER = 1
+FIELD_DELIMITER = ',';
+
+SHOW FILE FORMATS;
+
+CREATE OR REPLACE FILE FORMAT json_format
+TYPE = JSON;
+SHOW FILE FORMATS;
+
+
+LIST @hotel_stage;
+
+CREATE OR REPLACE TABLE DIM_CUSTOMER AS
+SELECT
+    customerId,
+    customerName,
+    email,
+    city,
+    customerType
+FROM CUSTOMERS;
+
+SELECT * FROM DIM_CUSTOMER;
+
+CREATE OR REPLACE TABLE DIM_HOTEL AS
+SELECT
+    hotelId,
+    hotelName,
+    location,
+    starRating,
+    status
+FROM HOTELS;
+
+SELECT * FROM DIM_HOTEL;
+
+CREATE OR REPLACE TABLE DIM_ROOM AS
+SELECT
+    roomId,
+    hotelId,
+    roomType,
+    roomPrice,
+    roomStatus
+FROM ROOMS;
+
+SELECT * FROM DIM_ROOM;
+
+CREATE OR REPLACE TABLE FACT_BOOKING (
+    bookingId STRING,
+    customerId STRING,
+    roomId STRING,
+    hotelId STRING,
+    bookingDate STRING,
+    bookingAmount STRING,
+    bookingStatus STRING
+);
+
+INSERT INTO FACT_BOOKING
+SELECT
+    b.bookingId,
+    b.customerId,
+    b.roomId,
+    r.hotelId,
+    b.bookingDate,
+    b.bookingAmount,
+    b.bookingStatus
+FROM BOOKINGS b
+JOIN ROOMS r
+ON b.roomId = r.roomId;
+
+SELECT * FROM FACT_BOOKING;
+
+SHOW TABLES;
+
+SELECT
+    hotelId,
+    SUM(bookingAmount) AS total_revenue
+FROM FACT_BOOKING
+GROUP BY hotelId;
+
+CREATE OR REPLACE STREAM booking_stream
+ON TABLE BOOKING;
+
+SHOW STREAMS;
+
+INSERT INTO BOOKING
+VALUES (1006,2,202,'2026-05-20',6000,'Confirmed');
+
+SELECT * FROM booking_stream;
+
+UPDATE BOOKING
+SET bookingStatus='Cancelled'
+WHERE bookingId=1006;
+
+SELECT * FROM booking_stream;
+DELETE FROM BOOKING
+WHERE bookingId=1006;
+
+SELECT * FROM booking_stream;
+
+CREATE OR REPLACE TASK refresh_fact_booking
+WAREHOUSE = HOTEL_WH
+SCHEDULE = '5 MINUTE'
+AS
+INSERT INTO FACT_BOOKING
+SELECT
+    bookingId,
+    customerId,
+    roomId,
+    NULL,
+    bookingDate,
+    bookingAmount,
+    bookingStatus
+FROM booking_stream;
+
+SHOW TASKS;
+
+ALTER TASK refresh_fact_booking RESUME;
+SHOW TASKS;
+
+INSERT INTO BOOKING
+VALUES (1007,3,203,'2026-05-21',7000,'Confirmed');
+
+SELECT * FROM FACT_BOOKING
+WHERE bookingId = 1007;
+
+ALTER TASK refresh_fact_booking SUSPEND;
+
+CREATE OR REPLACE DYNAMIC TABLE DT_REVENUE
+TARGET_LAG = '5 minutes'
+WAREHOUSE = HOTEL_WH
+AS
+SELECT
+    hotelId,
+    SUM(bookingAmount) AS total_revenue
+FROM FACT_BOOKING
+WHERE bookingStatus != 'Cancelled'
+GROUP BY hotelId;
+
+SHOW DYNAMIC TABLES;
+SELECT * FROM DT_REVENUE;
+
+INSERT INTO BOOKING
+VALUES (1008,4,204,'2026-05-22',9000,'Confirmed');
+SELECT * FROM DT_REVENUE;
+INSERT INTO BOOKING
+VALUES (1009,5,205,'2026-05-23',6000,'Cancelled');
+SELECT * FROM DT_REVENUE;
+
+CREATE OR REPLACE DYNAMIC TABLE DT_OCCUPANCY
+TARGET_LAG = '5 minutes'
+WAREHOUSE = HOTEL_WH
+AS
+SELECT
+    roomId,
+    COUNT(*) AS booking_count
+FROM FACT_BOOKING
+WHERE bookingStatus != 'Cancelled'
+GROUP BY roomId;
+
+SELECT * FROM DT_OCCUPANCY;
+
+CREATE OR REPLACE VIEW VW_HOTEL_REVENUE AS
+SELECT
+    hotelId,
+    SUM(bookingAmount) AS total_revenue
+FROM FACT_BOOKING
+WHERE bookingStatus != 'Cancelled'
+GROUP BY hotelId;
+SELECT * FROM VW_HOTEL_REVENUE;
+
+CREATE OR REPLACE VIEW VW_OCCUPANCY AS
+SELECT
+    roomId,
+    COUNT(*) AS occupancy_count
+FROM FACT_BOOKING
+WHERE bookingStatus != 'Cancelled'
+GROUP BY roomId;
+SELECT * FROM VW_OCCUPANCY;
+
+CREATE OR REPLACE DYNAMIC TABLE MV_HOTEL_PERFORMANCE
+TARGET_LAG = '5 minutes'
+WAREHOUSE = HOTEL_WH
+AS
+SELECT
+    hotelId,
+    COUNT(bookingId) AS total_bookings,
+    SUM(bookingAmount) AS total_revenue
+FROM FACT_BOOKING
+WHERE bookingStatus != 'Cancelled'
+GROUP BY hotelId;
+
+SELECT * FROM DT_HOTEL_PERFORMANCE;
+SHOW VIEWS;
+
+SHOW MATERIALIZED TABLES;
+SELECT * FROM MV_HOTEL_PERFORMANCE;
+CREATE OR REPLACE ROLE HOTEL_ADMIN;
+CREATE OR REPLACE ROLE ANALYST;
+SHOW ROLES;
+GRANT USAGE ON DATABASE HOTEL_DB TO ROLE HOTEL_ADMIN;
+GRANT USAGE ON DATABASE HOTEL_DB TO ROLE ANALYST;
+GRANT USAGE ON SCHEMA HOTEL_SCHEMA TO ROLE HOTEL_ADMIN;
+GRANT USAGE ON SCHEMA HOTEL_SCHEMA TO ROLE ANALYST;
+
+
+GRANT ALL PRIVILEGES
+ON ALL TABLES IN SCHEMA HOTEL_SCHEMA
+TO ROLE HOTEL_ADMIN;
+
+GRANT SELECT
+ON ALL TABLES IN SCHEMA HOTEL_SCHEMA
+TO ROLE ANALYST;
+
+CREATE OR REPLACE SECURE VIEW VW_CUSTOMERS_MASKED AS
+SELECT
+    customerId,
+    customerName,
+    CASE
+        WHEN CURRENT_ROLE() = 'HOTEL_ADMIN' THEN email
+        ELSE '*****@hidden.com'
+    END AS email,
+    city,
+    customerType
+FROM CUSTOMERS;
+GRANT SELECT ON VIEW VW_CUSTOMERS_MASKED TO ROLE ANALYST;
+DESC TABLE CUSTOMERS;
+USE ROLE ANALYST;
+SELECT customerName,email
+FROM VW_CUSTOMERS_MASKED;
+USE ROLE HOTEL_ADMIN;
+SELECT customerName,email
+FROM CUSTOMERS;
